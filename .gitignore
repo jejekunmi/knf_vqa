@@ -1,0 +1,9 @@
+data/preprocessed_images_train
+data/preprocessed_images_val
+data/preprocessed_images_train.zip
+data/preprocessed_images_val.zip
+vgg_net_dir/vgg16_weights.npz
+tensorboard/*
+.ipynb_checkpoints
+__pycache__
+skeleton_model/*

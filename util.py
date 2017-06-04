@@ -67,7 +67,8 @@ class obj(object):
             else:
                setattr(self, a, obj(b) if isinstance(b, dict) else b)
 
-def load_data_all(train_min_count=20, val_cutoff=107183, limit=10000000):
+def load_data_all(train_min_count=20, val_cutoff=107183, limit=10000000,
+                  filter_unknown=True):
     all_data = {"train": load_data("train", min_count=train_min_count),
                 "val": load_data("val",min_count=train_min_count)} 
 
@@ -76,18 +77,39 @@ def load_data_all(train_min_count=20, val_cutoff=107183, limit=10000000):
     Image_ids_train = all_data["train"]["image_ids"]
     All_answers_train =  all_data["train"]["answers"]
     Answers_train = most_common_answers(All_answers_train)
+    if filter_unknown:
+        known = (Answers_train != 0)
+        Questions_train = Questions_train[known]
+        Questions_mask_train = Questions_mask_train[known]
+        Image_ids_train = Image_ids_train[known]
+        All_answers_train =  All_answers_train[known]
+        Answers_train = Answers_train[known]
 
     Questions_val = all_data["val"]["questions"][:val_cutoff]
     Questions_mask_val = all_data["val"]["questions_mask"][:val_cutoff]
     Image_ids_val = all_data["val"]["image_ids"][:val_cutoff]
     All_answers_val = all_data["val"]["answers"][:val_cutoff]
     Answers_val = most_common_answers(All_answers_val)
+    if filter_unknown:
+        known = (Answers_val != 0)
+        Questions_val = Questions_val[known]
+        Questions_mask_val = Questions_mask_val[known]
+        Image_ids_val = Image_ids_val[known]
+        All_answers_val =  All_answers_val[known]
+        Answers_val = Answers_val[known]
 
     Questions_test = all_data["val"]["questions"][val_cutoff+1:]
     Questions_mask_test = all_data["val"]["questions_mask"][val_cutoff+1:]
     Image_ids_test = all_data["val"]["image_ids"][val_cutoff+1:]
     All_answers_test = all_data["val"]["answers"][val_cutoff+1:]
     Answers_test = most_common_answers(All_answers_test)
+    if filter_unknown:
+        known = (Answers_test != 0)
+        Questions_test = Questions_test[known]
+        Questions_mask_test = Questions_mask_test[known]
+        Image_ids_test = Image_ids_test[known]
+        All_answers_test =  All_answers_test[known]
+        Answers_test = Answers_test[known]
 
     dataset = {"train": {"questions": Questions_train[:limit], 
                          "mask":      Questions_mask_train[:limit],

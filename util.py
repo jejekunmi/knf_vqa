@@ -5,19 +5,22 @@ import pickle
 from collections import Counter
 import time
 import sys
+import tensorflow as tf
 
 _UNK = "<unk>"
 
-def initialize_model(session, model, model_dir):
-    ckpt = tf.train.get_checkpoint_state(train_dir)
-    v2_path = ckpt.model_checkpoint_path + ".index" if ckpt else ""
-    if ckpt and (tf.gfile.Exists(ckpt.model_checkpoint_path) or tf.gfile.Exists(v2_path)):
-        logging.info("Reading model parameters from %s" % ckpt.model_checkpoint_path)
+def initialize_model(session, model, model_dir, train_saved_model, config):
+    
+    if train_saved_model:
+        ckpt = tf.train.get_checkpoint_state(model_dir)
+        v2_path = ckpt.model_checkpoint_path + ".index" if ckpt else ""
+        print("Reading model parameters from %s" % ckpt.model_checkpoint_path)
         model.saver.restore(session, ckpt.model_checkpoint_path)
     else:
-        logging.info("Created model with fresh parameters.")
+        print("Created model with fresh parameters.")
         session.run(tf.global_variables_initializer())
-        logging.info('Num params: %d' % sum(v.get_shape().num_elements() for v in tf.trainable_variables()))
+        model.encoder.vgg_net.load_weights(weight_file=config.vgg16_weight_file, sess=session)
+        print('Num params: %d' % sum(v.get_shape().num_elements() for v in tf.trainable_variables()))
     return model
 
 def get_batch_from_indices(data, minibatch_idx):

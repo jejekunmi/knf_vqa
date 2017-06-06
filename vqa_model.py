@@ -373,14 +373,14 @@ class VQASystem(object):
         acc = self.evaluate_answer(sess, sample_size=self.config.num_evaluate, log=True, dataset=dataset) 
         return acc
 
-    def train(self, session, dataset):
+    def train(self, session, dataset, best_score=0.0):
         """
         Implement main training loop
 
         :param session: it should be passed in from train.py
         :return:
         """
-        self.best_score = 0.0
+        self.best_score = best_score
         self.step_num = 0
         #logs_path = "tensorboard/" + strftime("%Y_%m_%d_%H_%M_%S", gmtime())
         logs_path = "tensorboard/" + \

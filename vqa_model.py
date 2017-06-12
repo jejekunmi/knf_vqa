@@ -215,6 +215,10 @@ class VQASystem(object):
 
     def add_training_op(self):
         self.optimizer = self.config.optimizer(learning_rate=self.config.learning_rate)
+        self.global_step = tf.Variable(0, trainable=False)
+        self.lr = tf.train.exponential_decay(self.config.learning_rate, self.global_step,
+                                             self.config.decay_every, self.config.lr_decay)
+        self.optimizer = self.config.optimizer(learning_rate=self.lr)
 
         grad_list = self.optimizer.compute_gradients(self.loss)
         grads = [g for g, v in grad_list]
@@ -227,7 +231,10 @@ class VQASystem(object):
 
     def add_filtered_training_op(self):
         non_vgg = [v for v in tf.trainable_variables() if "vgg_16" not in v.name]
-        self.optimizer = self.config.optimizer(learning_rate=self.config.learning_rate)
+        self.global_step = tf.Variable(0, trainable=False)
+        self.lr = tf.train.exponential_decay(self.config.learning_rate, self.global_step,
+                                             self.config.decay_every, self.config.lr_decay)
+        self.optimizer = self.config.optimizer(learning_rate=self.lr)
 
         grad_list = self.optimizer.compute_gradients(self.loss, var_list=non_vgg)
         print(len(grad_list))
@@ -273,7 +280,8 @@ class VQASystem(object):
     def create_feed_dict(self, image_inputs_batch=None, image_mask_batch=None, question_inputs_batch=None,
                          question_masks_batch=None, answers_batch=None, 
                          all_answers_batch=None, dropout_keep_prob=1.0,
-                         is_training=False):
+                         is_training=False,
+                         global_step=None):
         feed_dict = {}
         if image_inputs_batch is not None: 
             feed_dict[self.image_input_placeholder] = image_inputs_batch
@@ -290,7 +298,9 @@ class VQASystem(object):
         if dropout_keep_prob is not None: 
             feed_dict[self.dropout_placeholder] = dropout_keep_prob 
         if is_training is not None: 
-            feed_dict[self.is_training_placeholder] = is_training 
+            feed_dict[self.is_training_placeholder] = is_training
+        if global_step is not None: 
+            feed_dict[self.global_step] = global_step
         return feed_dict
 
     def optimize(self, session, train_x, train_y):
@@ -306,7 +316,8 @@ class VQASystem(object):
                                            question_masks_batch=mask_batch, 
                                            answers_batch=answers_batch, 
                                            dropout_keep_prob=self.config.dropout_keep_prob,
-                                           is_training=True)
+                                           is_training=True,
+                                           global_step=self.step_num)
         output_feed = [self.train_op, self.loss, self.grad_norm, 
                        self.train_loss_summary, self.grad_norm_summary, self.encoder.alpha]
         

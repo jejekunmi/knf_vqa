@@ -53,7 +53,8 @@ def download_all(data_type, link_dict, data_dir):
         if not os.path.exists(data_dir + '/' + outfile):
             os.system(download_op.format(l))
             os.system(unzip_op.format(l.rsplit('/', 1)[-1]))
-            os.system(rename_op.format(max(glob.iglob( data_dir + '/*'), key=os.path.getctime), outfile)) 
+            os.system(rename_op.format(max(
+                        b.iglob( data_dir + '/*'), key=os.path.getctime), outfile)) 
             os.system(delete_op.format(l.rsplit('/', 1)[-1]))
 
 
@@ -172,6 +173,43 @@ def preprocess_images(data_dir):
 
     print("************************************\n") 
 
+def gen_q_to_anstype_file(json_data, data_type, qid_to_anstype):
+
+    
+    annotation_list = json_data["annotations"]
+
+    print("Processing", len(annotation_list), "annotations")
+
+
+    for ind, annotation in enumerate(annotation_list):
+        question_id = annotation["question_id"]
+        ans_type = annotation["answer_type"]
+
+        qid_to_anstype[question_id] = ans_type
+
+        if ind % 100000 == 0:
+            print("Processed", ind, "answers")
+
+
+
+def gen_q_to_anstype():
+    print("\n*** Processing raw annotations ***")
+    
+    qid_to_anstype = {}
+    
+    train_anno = json.load(open('data/download_annotations_train', 'r'))
+    val_anno = json.load(open('data/download_annotations_val', 'r')) 
+
+    gen_q_to_anstype_file(train_anno, "train", qid_to_anstype)
+    gen_q_to_anstype_file(val_anno, "val", qid_to_anstype)
+    
+    with open('data/qid_to_anstype.dat', 'wb') as fp:
+        pickle.dump(qid_to_anstype, fp)
+    
+    print(len(qid_to_anstype))
+
+    print("************************************\n") 
+    
 def process_raw_anno(json_data, data_type):
 
     
@@ -344,7 +382,7 @@ def data_with_tokens():
 
     print("************************************\n")
 
-def initialize_vocabulary(vocabulary_path):
+def initialize_vocabulary(vocabulary_path="data/vocab.dat"):
     # map vocab to word embeddings
     rev_vocab = []
     with open(vocabulary_path) as f:

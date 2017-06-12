@@ -5,19 +5,62 @@ import pickle
 from collections import Counter
 import time
 import sys
+import tensorflow as tf
 
 _UNK = "<unk>"
 
-def initialize_model(session, model, model_dir):
-    ckpt = tf.train.get_checkpoint_state(train_dir)
-    v2_path = ckpt.model_checkpoint_path + ".index" if ckpt else ""
-    if ckpt and (tf.gfile.Exists(ckpt.model_checkpoint_path) or tf.gfile.Exists(v2_path)):
-        logging.info("Reading model parameters from %s" % ckpt.model_checkpoint_path)
-        model.saver.restore(session, ckpt.model_checkpoint_path)
+def lines_to_padded_np_array(data, max_length):
+    padded_seqs = []
+    masks = []
+    
+    for sentence in data:
+        sentence_len = len(sentence)
+        sentence = [int(s) for s in sentence]
+        if sentence_len >= max_length:
+            padded_seqs.append(np.array(sentence[:max_length]))
+            masks.append(max_length)
+        else:
+            p_len = max_length - sentence_len
+            new_sentence = sentence + [0] * p_len
+            padded_seqs.append(np.array(new_sentence))
+            masks.append(sentence_len)
+    return {'data': np.array(padded_seqs), 'mask': np.array(masks)}
+
+def optimistic_restore(session, save_file):
+    session.run(tf.global_variables_initializer())
+    reader = tf.train.NewCheckpointReader(save_file)
+    saved_shapes = reader.get_variable_to_shape_map()
+    var_names = sorted([(var.name, var.name.split(':')[0]) for var in tf.global_variables()
+                                                if var.name.split(':')[0] in saved_shapes])
+    restore_vars = []
+    name2var = dict(zip(map(lambda x:x.name.split(':')[0], tf.global_variables()), tf.global_variables()))
+    with tf.variable_scope('', reuse=True):
+        for var_name, saved_var_name in var_names:
+            curr_var = name2var[saved_var_name]
+            var_shape = curr_var.get_shape().as_list()
+            if var_shape == saved_shapes[saved_var_name]:
+                restore_vars.append(curr_var)
+    saver = tf.train.Saver(restore_vars)
+    saver.restore(session, save_file)
+
+def initialize_model(session, model, model_dir,train_saved_model, config):
+    if train_saved_model:
+        ckpt = tf.train.get_checkpoint_state(model_dir)
+        v2_path = ckpt.model_checkpoint_path + ".index" if ckpt else ""
+        print("Reading model parameters from %s" % ckpt.model_checkpoint_path)
+        optimistic_restore(session, ckpt.model_checkpoint_path)
     else:
-        logging.info("Created model with fresh parameters.")
+        print("Created model with fresh parameters.")
         session.run(tf.global_variables_initializer())
-        logging.info('Num params: %d' % sum(v.get_shape().num_elements() for v in tf.trainable_variables()))
+        #model.encoder.vgg_net.load_weights(weight_file=config.vgg16_weight_file, sess=session)
+        # Restore only the layers up to fc7 (included)
+        # Calling function `init_fn(sess)` will load all the pretrained weights.
+        variables_to_restore = \
+            tf.contrib.framework.get_variables_to_restore(config.vgg_exclude_names)
+        init_fn = tf.contrib.framework.assign_from_checkpoint_fn(config.model_dir, variables_to_restore)
+        
+
+        print('Num params: %d' % sum(v.get_shape().num_elements() for v in tf.trainable_variables()))
     return model
 
 def get_batch_from_indices(data, minibatch_idx):
@@ -74,6 +117,7 @@ def load_data_all(train_min_count=20, val_cutoff=107183, limit=10000000,
 
     Questions_train = all_data["train"]["questions"]
     Questions_mask_train = all_data["train"]["questions_mask"]
+    Question_ids_train = all_data["train"]["question_ids"]
     Image_ids_train = all_data["train"]["image_ids"]
     All_answers_train =  all_data["train"]["answers"]
     Answers_train = most_common_answers(All_answers_train)
@@ -81,12 +125,14 @@ def load_data_all(train_min_count=20, val_cutoff=107183, limit=10000000,
         known = (Answers_train != 0)
         Questions_train = Questions_train[known]
         Questions_mask_train = Questions_mask_train[known]
+        Question_ids_train = Question_ids_train[known]
         Image_ids_train = Image_ids_train[known]
         All_answers_train =  All_answers_train[known]
         Answers_train = Answers_train[known]
 
     Questions_val = all_data["val"]["questions"][:val_cutoff]
     Questions_mask_val = all_data["val"]["questions_mask"][:val_cutoff]
+    Question_ids_val = all_data["val"]["question_ids"][:val_cutoff]
     Image_ids_val = all_data["val"]["image_ids"][:val_cutoff]
     All_answers_val = all_data["val"]["answers"][:val_cutoff]
     Answers_val = most_common_answers(All_answers_val)
@@ -94,12 +140,14 @@ def load_data_all(train_min_count=20, val_cutoff=107183, limit=10000000,
         known = (Answers_val != 0)
         Questions_val = Questions_val[known]
         Questions_mask_val = Questions_mask_val[known]
+        Question_ids_val = Question_ids_val[known]
         Image_ids_val = Image_ids_val[known]
         All_answers_val =  All_answers_val[known]
         Answers_val = Answers_val[known]
 
     Questions_test = all_data["val"]["questions"][val_cutoff+1:]
     Questions_mask_test = all_data["val"]["questions_mask"][val_cutoff+1:]
+    Question_ids_test = all_data["val"]["question_ids"][val_cutoff+1:]
     Image_ids_test = all_data["val"]["image_ids"][val_cutoff+1:]
     All_answers_test = all_data["val"]["answers"][val_cutoff+1:]
     Answers_test = most_common_answers(All_answers_test)
@@ -107,6 +155,7 @@ def load_data_all(train_min_count=20, val_cutoff=107183, limit=10000000,
         known = (Answers_test != 0)
         Questions_test = Questions_test[known]
         Questions_mask_test = Questions_mask_test[known]
+        Question_ids_test = Question_ids_test[known]
         Image_ids_test = Image_ids_test[known]
         All_answers_test =  All_answers_test[known]
         Answers_test = Answers_test[known]
@@ -114,15 +163,18 @@ def load_data_all(train_min_count=20, val_cutoff=107183, limit=10000000,
     dataset = {"train": {"questions": Questions_train[:limit], 
                          "mask":      Questions_mask_train[:limit],
                          "image_ids": Image_ids_train[:limit],
+                         "question_ids": Question_ids_train[:limit].astype(np.int32),
                          "all_answers": All_answers_train[:limit],
                          "answers":   Answers_train[:limit]},
                "val"  : {"questions": Questions_val[:limit], 
                          "mask":      Questions_mask_val[:limit],
                          "image_ids": Image_ids_val[:limit],
+                         "question_ids": Question_ids_val[:limit].astype(np.int32),
                          "all_answers":   All_answers_val[:limit],
                          "answers":   Answers_val[:limit]},
                "test" : {"questions": Questions_test[:limit], 
                          "mask":      Questions_mask_test[:limit],
+                         "question_ids": Question_ids_test[:limit].astype(np.int32),
                          "image_ids": Image_ids_test[:limit],
                          "all_answers":   All_answers_test[:limit],
                          "answers":   Answers_test[:limit]}}

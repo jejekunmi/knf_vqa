@@ -7,19 +7,116 @@ from time import gmtime, strftime
 from random import sample as rand_sample
 from PIL import Image
 import image_utils
+from functools import lru_cache
+from collections import Counter
+import data_processing
+import nltk
+from nltk.tokenize import WordPunctTokenizer
+wpTokenizer = WordPunctTokenizer()
+
+
+
+class AttnGRUCell(tf.contrib.rnn.RNNCell):
+    """Gated Recurrent Unit cell (cf. http://arxiv.org/abs/1406.1078)."""
+
+    def __init__(self, num_units, attention, batch_normalize, is_training):
+        self._num_units = num_units
+        self.attention = attention
+        self.time_step = 0
+        self.batch_normalize = batch_normalize
+        self.is_training = is_training
+
+    @property
+    def state_size(self):
+        return self._num_units
+
+    @property
+    def output_size(self):
+        return self._num_units
+
+    def __call__(self, inputs, state, scope=None):
+        with tf.variable_scope(scope or type(self).__name__):  # "GRUCell"
+            with tf.variable_scope("Gates"):  # Reset gate and update gate.
+                # We start with bias of 1.0 to not reset and not update.
+                r = self._linear(inputs, state, bias_default=1.0)
+                r = tf.nn.sigmoid(r)
+            with tf.variable_scope("Candidate"):
+                c = tf.nn.tanh(self._linear(inputs, r * state))
+            attn = tf.reshape(self.attention[:,self.time_step], shape=[-1, 1])
+            new_h = attn * state + (1 - attn) * c
+            self.time_step += 1
+        return new_h, new_h
+    
+    def _linear(self, x, h, bias_default=0.0):
+        I, D = x.get_shape().as_list()[1], self._num_units
+        W_att = tf.get_variable(name="W_att", shape=[I, D], 
+                                initializer=tf.contrib.layers.xavier_initializer())
+        U_att = tf.get_variable(name="U_att", shape=[D, D], 
+                                initializer=tf.contrib.layers.xavier_initializer())
+        b_att = tf.get_variable(name="b_att", shape=[D,], 
+                                dtype=tf.float32, 
+                                initializer=tf.constant_initializer(bias_default))
+
+        xW = tf.matmul(x, W_att)
+        hU =  tf.matmul(h, U_att)
+        if self.batch_normalize:
+            xW = tf.layers.batch_normalization(xW, training=self.is_training)
+            hU = tf.layers.batch_normalization(hU, training=self.is_training)       
+        
+        return xW + hU + b_att
+
+# https://github.com/therne/dmn-tensorflow/blob/master/utils/attn_gru.py
+class AttnGRU:
+    """Attention-based Gated Recurrent Unit cell (cf. https://arxiv.org/abs/1603.01417)."""
+
+    def __init__(self, num_units, batch_normalize, is_training):
+        self._num_units = num_units
+        self.batch_normalize = batch_normalize
+        self.is_training = is_training
+
+    def __call__(self, inputs, state, attention, scope=None):
+        """Gated recurrent unit (GRU) with nunits cells."""
+        with tf.variable_scope(scope or 'AttrGRU'):
+            with tf.variable_scope("Gates"):  # Reset gate and update gate.
+                # We start with bias of 1.0 to not reset.
+                r = tf.nn.sigmoid(self._linear(inputs, state, bias_default=1.0))
+            with tf.variable_scope("Candidate"):
+                c = tf.tanh(self._linear(inputs, r * state))
+
+            new_h = attention * c + (1 - attention) * state
+        return new_h
+
+    def _linear(self, x, h, bias_default=0.0):
+        I, D = x.get_shape().as_list()[1], self._num_units
+        W_att = tf.get_variable(name="W_att", shape=[I, D], 
+                                initializer=tf.contrib.layers.xavier_initializer())
+        U_att = tf.get_variable(name="U_att", shape=[D, D], 
+                                initializer=tf.contrib.layers.xavier_initializer())
+        b_att = tf.get_variable(name="b_att", shape=[D,], 
+                                dtype=tf.float32, 
+                                initializer=tf.constant_initializer(0.0))
+    
+        xW = tf.matmul(x, W_att)
+        hU =  tf.matmul(h, U_att)
+        if self.batch_normalize:
+            xW = tf.layers.batch_normalization(xW, training=self.is_training)
+            hU = tf.layers.batch_normalization(hU, training=self.is_training)       
+        
+        return xW + hU + b_att
 
 class Encoder(object):
     def __init__(self, config):
         self.config = config
 
-    def encode(self, inputs, masks, encoder_state_input, embeddings, dropout_keep_prob):
+    def encode(self, inputs, masks, encoder_state_input, 
+               embeddings, dropout_keep_prob, is_training):
         pass        
 
 class Decoder(object):
     def __init__(self, config):
         self.config = config
 
-    def decode(self, knowledge_rep, dropout_keep_prob):
+    def decode(self, knowledge_rep, dropout_keep_prob, is_training):
         pass
 
 class VQASystem(object):
@@ -67,7 +164,7 @@ class VQASystem(object):
                                                      [None, self.config.num_answers_per_question])
         
         # image mask (because of bidirectinal rnn bug)
-        #self.image_mask_placeholder = tf.placeholder(tf.int32, shape=[None,], name="image_masks")
+        self.image_mask_placeholder = tf.placeholder(tf.int32, shape=[None,], name="image_masks")
         
         # Dropout rate
         self.dropout_placeholder = tf.placeholder(tf.float32, shape=(), name="dropout")
@@ -80,14 +177,17 @@ class VQASystem(object):
 
     def setup_system(self):
         encoding = self.encoder.encode(inputs=(self.image_input_placeholder,
-                                               #self.image_mask_placeholder,
+                                               self.image_mask_placeholder,
                                                self.question_input_placeholder, 
                                                self.question_mask_placeholder),
                                        encoder_state_input=None,
-                                       embeddings=self.embeddings, dropout_keep_prob=self.dropout_placeholder)
+                                       embeddings=self.embeddings, 
+                                       dropout_keep_prob=self.dropout_placeholder,
+                                       is_training=self.is_training_placeholder)
         print("encoding", encoding)
 
-        self.scores = self.decoder.decode(encoding, dropout_keep_prob=self.dropout_placeholder)
+        self.scores = self.decoder.decode(encoding, dropout_keep_prob=self.dropout_placeholder,
+                                          is_training=self.is_training_placeholder)
         print("scores", self.scores)
         print("Done setting up system!")
 
@@ -126,11 +226,12 @@ class VQASystem(object):
         print("Done adding training op!")
 
     def add_filtered_training_op(self):
+        non_vgg = [v for v in tf.trainable_variables() if "vgg_16" not in v.name]
         self.optimizer = self.config.optimizer(learning_rate=self.config.learning_rate)
 
-        grad_list = self.optimizer.compute_gradients(self.loss)
+        grad_list = self.optimizer.compute_gradients(self.loss, var_list=non_vgg)
         print(len(grad_list))
-        grad_list = [(g, v) for (g, v) in grad_list if v not in self.encoder.vgg_net.parameters]
+        grad_list = [(g, v) for (g, v) in grad_list]
         print(len(grad_list))
         grads = [g for g, v in grad_list]
         if self.config.clip_gradients:            
@@ -156,7 +257,9 @@ class VQASystem(object):
     
     def add_eval_op(self):
         self.pred_answer = tf.cast(tf.argmax(self.scores, axis=1), tf.int32)
+        print("pred_answer", self.pred_answer)
         self.correct_pred = tf.equal(self.pred_answer, self.answer_placeholder)
+        print("correct_pred", self.correct_pred)
         self.accuracy = tf.reduce_mean(tf.cast(self.correct_pred, tf.float32))
         
     def add_summaries(self):
@@ -169,12 +272,13 @@ class VQASystem(object):
                 
     def create_feed_dict(self, image_inputs_batch=None, image_mask_batch=None, question_inputs_batch=None,
                          question_masks_batch=None, answers_batch=None, 
-                         all_answers_batch=None, dropout_keep_prob=1.0):
+                         all_answers_batch=None, dropout_keep_prob=1.0,
+                         is_training=False):
         feed_dict = {}
         if image_inputs_batch is not None: 
             feed_dict[self.image_input_placeholder] = image_inputs_batch
-            #feed_dict[self.image_mask_placeholder] = self.config.images_input_sequece_len * \
-            #                                         np.ones(len(image_inputs_batch), dtype=np.int32)
+            feed_dict[self.image_mask_placeholder] = self.config.images_input_sequece_len * \
+                                                     np.ones(len(image_inputs_batch), dtype=np.int32)
         if question_inputs_batch is not None: 
             feed_dict[self.question_input_placeholder] = question_inputs_batch
         if question_masks_batch is not None: 
@@ -184,7 +288,9 @@ class VQASystem(object):
         if all_answers_batch is not None: 
             feed_dict[self.all_answer_placeholder] = all_answers_batch
         if dropout_keep_prob is not None: 
-            feed_dict[self.dropout_placeholder] = dropout_keep_prob        
+            feed_dict[self.dropout_placeholder] = dropout_keep_prob 
+        if is_training is not None: 
+            feed_dict[self.is_training_placeholder] = is_training 
         return feed_dict
 
     def optimize(self, session, train_x, train_y):
@@ -199,13 +305,16 @@ class VQASystem(object):
                                            question_inputs_batch=question_batch,
                                            question_masks_batch=mask_batch, 
                                            answers_batch=answers_batch, 
-                                           dropout_keep_prob=self.config.dropout_keep_prob)
+                                           dropout_keep_prob=self.config.dropout_keep_prob,
+                                           is_training=True)
         output_feed = [self.train_op, self.loss, self.grad_norm, 
-                       self.train_loss_summary, self.grad_norm_summary]
+                       self.train_loss_summary, self.grad_norm_summary, self.encoder.alpha]
         
-        _, train_loss, g_norm, train_loss_summ, gnorm_summ = session.run(output_feed, input_feed)
+        _, train_loss, g_norm, train_loss_summ, gnorm_summ, attn = session.run(output_feed, input_feed)
         self.train_writer.add_summary(train_loss_summ, self.step_num)
         self.train_writer.add_summary(gnorm_summ, self.step_num)
+        
+        self.decoder.plot(np.squeeze(attn[0]))
                 
         #return (train_loss, g_norm)
 
@@ -221,7 +330,8 @@ class VQASystem(object):
                                            question_inputs_batch=question_batch,
                                            question_masks_batch=mask_batch, 
                                            answers_batch=answers_batch, 
-                                           dropout_keep_prob=1.0)
+                                           dropout_keep_prob=1.0,
+                                           is_training=True)
         output_feed = [self.loss, self.val_loss_summary]
         
         val_loss, val_loss_summ = session.run(output_feed, input_feed)
@@ -233,16 +343,32 @@ class VQASystem(object):
         input_feed = self.create_feed_dict(image_inputs_batch=image_batch, 
                                            question_inputs_batch=question_batch,
                                            question_masks_batch=mask_batch, 
-                                           answers_batch=answers_batch, 
                                            dropout_keep_prob=1.0)
         output_feed = [self.pred_answer]
         
         answers_id = session.run(output_feed, input_feed)
-        #writer.add_summary(val_loss, step)
-        return loss
+        return answers_id
 
     def answer(self, session, test_x):
         return self.decode(session, test_x)
+    
+    def answer_my_question(self, sess, image, question, vocab, rev_vocab, 
+                           answer_to_id, id_to_answer):
+        
+        question_tokens = data_processing.tokenize(question)
+        question_as_ids = [vocab[q] if q in vocab else vocab['<unk>'] for q in question_tokens]
+        questions_input = data_processing.lines_to_padded_np_array([question_as_ids],
+                                                                   self.config.max_question_length)
+        input_feed = self.create_feed_dict(image_inputs_batch=np.array([image]), 
+                                           question_inputs_batch=questions_input["data"],
+                                           question_masks_batch=questions_input["mask"], 
+                                           dropout_keep_prob=1.0)
+        output_feed = [self.pred_answer, self.encoder.q_im_attn]
+        
+        ans, attention = sess.run(output_feed, input_feed)
+        
+        return id_to_answer[ans], attention
+        
 
     def validate(self, sess, valid_dataset):
         pass
@@ -277,6 +403,10 @@ class VQASystem(object):
         filename,read_img = self.read_image(filename_queue)
         return filename, read_img
     
+    @lru_cache(maxsize=8192)
+    def get_image_from_file(self, filename):
+        return np.asarray(Image.open(filename))
+    
     def get_image_batch(self, sess, image_ids_batch, datatype):
         #tic = time.time()
         input_files = ['data/preprocessed_images_' + datatype + '/' + str(img_id) + '.jpeg'
@@ -285,13 +415,56 @@ class VQASystem(object):
         images_batch = np.empty([len(image_ids_batch)] + self.config.image_size)
         
         for i, f in enumerate(input_files):
-            im = np.asarray(Image.open(f))
+            im = self.get_image_from_file(f)
             #print(im.shape)
             images_batch[i] = im
         
         #toc = time.time()
         #print("Took {} seconds".format(toc - tic))
         return images_batch
+    
+    def evaluate_data(self, session, sample_size=100, log=False, 
+                      dataset=None, qid_to_anstype=None, datatype="train"):
+        im_folder = datatype
+        if datatype == "test":
+            im_folder = "val"
+        eval_indices = rand_sample(list(range(dataset.questions.shape[0])), sample_size)
+        eval_batch = util.get_minibatches_indices(eval_indices, self.config.batch_size) 
+        
+        correct_counter = Counter()
+        total_counter = Counter()
+        prog = util.Progbar(target=1 + int(len(eval_indices) / self.config.batch_size))
+        for i in range(len(eval_batch)):
+            # Run optimizer for train data
+            batch_indices = eval_batch[i]
+            image_ids_batch = util.get_batch_from_indices(dataset.image_ids, batch_indices) 
+            image_batch = self.get_image_batch(session, image_ids_batch, im_folder)
+            question_batch = util.get_batch_from_indices(dataset.questions, batch_indices)
+            question_ids_batch = util.get_batch_from_indices(dataset.question_ids, batch_indices)
+            mask_batch = util.get_batch_from_indices(dataset.mask, batch_indices)
+            answers_batch = util.get_batch_from_indices(dataset.answers, batch_indices)
+            preds_batch = self.answer(session, (image_batch, question_batch, mask_batch))[0]
+            #print(preds_batch)
+            
+            for j in range(len(batch_indices)):
+                correct = answers_batch[j]
+                pred = preds_batch[j]
+                #print(correct, pred)
+                answer_type = qid_to_anstype[question_ids_batch[j]]
+                
+                total_counter[answer_type] += 1
+                if correct == pred:
+                    correct_counter[answer_type] += 1
+            prog.update(i + 1)
+        accuracy = 100.0 * sum(correct_counter.values()) / sum(total_counter.values()) 
+        print("*" * 25)
+        print("Overall accuracy ({}): {}".format(datatype, accuracy))
+        for ans_type, tot_count in total_counter.items():
+            acc = 100.0 * correct_counter[ans_type] / tot_count
+            print("Accuracy for ({}): {} ({}/{})".format(ans_type, acc, 
+                                                         correct_counter[ans_type],
+                                                         tot_count))
+        print("*" * 25)
     
     def evaluate_answer(self, session, sample_size=100, log=False, dataset=None):
         train_indices = rand_sample(list(range(dataset.train.questions.shape[0])), sample_size)
@@ -369,28 +542,29 @@ class VQASystem(object):
             
             self.step_num += 1
             prog.update(i + 1, [("Training", i)])
-                        
+                 
+        print(self.get_image_from_file.cache_info())
         acc = self.evaluate_answer(sess, sample_size=self.config.num_evaluate, log=True, dataset=dataset) 
         return acc
 
-    def train(self, session, dataset):
+    def train(self, session, dataset, best_score=0.0):
         """
         Implement main training loop
 
         :param session: it should be passed in from train.py
         :return:
         """
-        self.best_score = 0.0
+        self.best_score = best_score
         self.step_num = 0
         #logs_path = "tensorboard/" + strftime("%Y_%m_%d_%H_%M_%S", gmtime())
-        logs_path = "tensorboard/" + \
+        logs_path = "tensorboard/" + strftime("%Y_%m_%d_%H_%M_%S", gmtime()) +  \
             "lr_{}_lrd_{}_r_{}_gn_{}_dr_{}_bs_{}".format(self.config.learning_rate,
                                                          self.config.lr_decay,
                                                          self.config.l2_reg,
                                                          self.config.max_gradient_norm,
                                                          self.config.dropout_keep_prob,
-                                                         self.config.batch_size) + \
-            strftime("%Y_%m_%d_%H_%M_%S", gmtime())
+                                                         self.config.batch_size)
+            
         self.train_writer = tf.summary.FileWriter(logs_path + '/train', session.graph)
         self.train_writer.add_graph(session.graph)
         #self.val_writer = tf.summary.FileWriter(logs_path + '/val', session.graph)
